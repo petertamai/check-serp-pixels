@@ -50,9 +50,9 @@ const createContext = (fontSize, fontFamily = 'Arial') => {
 const META_SETTINGS = {
   title: {
     fontFamily: 'Arial',
-    fontSize: 20, // Google's internal logic uses closer to 16px
+    fontSize: 19, // Google's internal logic uses closer to 16px
     maxPixels: 600,
-    visualFontSize: 20 // Actual visual size in SERP
+    visualFontSize: 19 // Actual visual size in SERP
   },
   description: {
     fontFamily: 'Arial',
