@@ -18,6 +18,26 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 app.use(morgan('dev'));
 
+// Add middleware to handle various input formats for batch endpoint
+app.use((req, res, next) => {
+  // Only process POST requests to the batch endpoint
+  if (req.method === 'POST' && req.path === '/api/analyze/batch') {
+    // Log the raw request body for debugging
+    console.log('Raw request body:', typeof req.body, JSON.stringify(req.body, null, 2));
+    
+    // Check if the body is a string (might happen with some clients)
+    if (typeof req.body === 'string') {
+      try {
+        req.body = JSON.parse(req.body);
+      } catch (e) {
+        // If parsing fails, continue with the original body
+        console.error('Failed to parse string body:', e.message);
+      }
+    }
+  }
+  next();
+});
+
 // Create a canvas context for text measurement
 const createContext = (fontSize, fontFamily = 'Arial') => {
   const canvas = createCanvas(1, 1);
@@ -131,32 +151,79 @@ app.all('/api/analyze', validateMetaParams, (req, res) => {
   res.json(response);
 });
 
-// Batch processing validation middleware
-const validateBatchRequest = [
-  body('items').isArray().withMessage('Items must be an array'),
-  body('items.*.id').optional().isString().withMessage('Item ID must be a string'),
-  body('items.*.title').optional().isString().withMessage('Title must be a string'),
-  body('items.*.description').optional().isString().withMessage('Description must be a string')
-];
-
-// POST endpoint to analyze batches of meta tags
-app.post('/api/analyze/batch', validateBatchRequest, (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
-  
+// Batch endpoint with robust handling of various input formats
+app.post('/api/analyze/batch', (req, res) => {
   try {
-    const { items } = req.body;
+    // Log what we received for debugging
+    console.log('Request body type:', typeof req.body);
+    console.log('Request body keys:', Object.keys(req.body));
     
+    // Extract the items array from wherever it might be in the request
+    let items;
+    
+    if (req.body && req.body.items && Array.isArray(req.body.items)) {
+      // Standard format: { items: [...] }
+      items = req.body.items;
+      console.log('Found items array in req.body.items');
+    } else if (Array.isArray(req.body)) {
+      // Direct array: [...]
+      items = req.body;
+      console.log('Request body is directly an array');
+    } else if (req.body && typeof req.body === 'object') {
+      // Try to find an items array somewhere in the object
+      let found = false;
+      
+      // Check first level properties for an items array
+      for (const key of Object.keys(req.body)) {
+        const value = req.body[key];
+        if (value && typeof value === 'object') {
+          if (Array.isArray(value)) {
+            items = value;
+            found = true;
+            console.log(`Found array in req.body.${key}`);
+            break;
+          } else if (value.items && Array.isArray(value.items)) {
+            items = value.items;
+            found = true;
+            console.log(`Found items array in req.body.${key}.items`);
+            break;
+          }
+        }
+      }
+      
+      if (!found) {
+        // As a last resort, try to construct an array from the request body
+        if (req.body.title || req.body.description) {
+          items = [req.body];
+          console.log('Treating single item as array');
+        } else {
+          return res.status(400).json({ 
+            error: 'Could not find a valid items array in the request',
+            receivedBody: req.body
+          });
+        }
+      }
+    } else {
+      return res.status(400).json({ 
+        error: 'Invalid request format',
+        receivedBody: req.body 
+      });
+    }
+    
+    // Ensure items is defined and is an array
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ 
-        error: 'Please provide an array of items to analyze' 
+        error: 'No items to analyze found in request',
+        receivedBody: req.body
       });
     }
     
     // Process each item in the batch
     const results = items.map(item => {
+      if (!item || typeof item !== 'object') {
+        return { error: 'Invalid item format' };
+      }
+      
       const result = {
         id: item.id || null // Include the ID if provided
       };
@@ -183,9 +250,11 @@ app.post('/api/analyze/batch', validateBatchRequest, (req, res) => {
     });
   } catch (error) {
     console.error(`[ERROR] Batch processing failed: ${error.message}`);
+    console.error(error.stack);
     res.status(500).json({
       error: 'Batch processing failed',
-      message: process.env.NODE_ENV === 'production' ? 'Something went wrong' : error.message
+      message: process.env.NODE_ENV === 'production' ? 'Something went wrong' : error.message,
+      receivedBody: req.body
     });
   }
 });
