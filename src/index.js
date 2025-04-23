@@ -131,6 +131,65 @@ app.all('/api/analyze', validateMetaParams, (req, res) => {
   res.json(response);
 });
 
+// Batch processing validation middleware
+const validateBatchRequest = [
+  body('items').isArray().withMessage('Items must be an array'),
+  body('items.*.id').optional().isString().withMessage('Item ID must be a string'),
+  body('items.*.title').optional().isString().withMessage('Title must be a string'),
+  body('items.*.description').optional().isString().withMessage('Description must be a string')
+];
+
+// POST endpoint to analyze batches of meta tags
+app.post('/api/analyze/batch', validateBatchRequest, (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+  
+  try {
+    const { items } = req.body;
+    
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ 
+        error: 'Please provide an array of items to analyze' 
+      });
+    }
+    
+    // Process each item in the batch
+    const results = items.map(item => {
+      const result = {
+        id: item.id || null // Include the ID if provided
+      };
+      
+      if (item.title) {
+        result.title = analyzeText(item.title, 'title');
+      }
+      
+      if (item.description) {
+        result.description = analyzeText(item.description, 'description');
+      }
+      
+      if (!item.title && !item.description) {
+        result.error = 'Item must contain either a title or description';
+      }
+      
+      return result;
+    });
+    
+    res.json({
+      items: results,
+      count: results.length,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error(`[ERROR] Batch processing failed: ${error.message}`);
+    res.status(500).json({
+      error: 'Batch processing failed',
+      message: process.env.NODE_ENV === 'production' ? 'Something went wrong' : error.message
+    });
+  }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
@@ -154,6 +213,14 @@ app.get('/', (req, res) => {
           get: '/api/analyze?title=Your%20Meta%20Title&description=Your%20meta%20description%20here',
           post: 'POST to /api/analyze with JSON body: {"title": "Your Meta Title", "description": "Your meta description here"}'
         }
+      },
+      '/api/analyze/batch': {
+        methods: ['POST'],
+        description: 'Analyze multiple meta titles and descriptions in a single request',
+        parameters: {
+          items: 'Array of objects containing id (optional), title (optional), and description (optional)'
+        },
+        example: 'POST to /api/analyze/batch with JSON body: {"items": [{"id": "1", "title": "First Title", "description": "First description"}, {"id": "2", "title": "Second Title"}]}'
       },
       '/health': {
         methods: ['GET'],
