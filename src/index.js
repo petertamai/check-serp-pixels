@@ -5,7 +5,8 @@ const cors = require('cors');
 const morgan = require('morgan');
 const { body, query, validationResult } = require('express-validator');
 const dotenv = require('dotenv');
-const axios = require('axios'); // Add axios for HTTP requests
+const https = require('https');
+const url = require('url');
 
 // Load environment variables
 dotenv.config();
@@ -113,6 +114,70 @@ const analyzeText = (text, type) => {
     })
   };
 };
+
+// Custom HTTPS request function
+function httpsGet(requestUrl, timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    // Parse the URL to get hostname, path, etc.
+    const parsedUrl = url.parse(requestUrl);
+    
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || 443,
+      path: parsedUrl.path,
+      method: 'GET',
+      timeout: timeout,
+      headers: {
+        'User-Agent': 'Meta-Pixel-Calculator/1.0.0',
+        'Accept': 'application/json'
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      
+      // Handle redirection (status codes 301, 302, 307, 308)
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        console.log(`Redirecting to: ${res.headers.location}`);
+        return httpsGet(res.headers.location, timeout)
+          .then(resolve)
+          .catch(reject);
+      }
+
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        try {
+          // Parse JSON response
+          const jsonData = JSON.parse(data);
+          resolve({ 
+            data: jsonData, 
+            status: res.statusCode,
+            headers: res.headers
+          });
+        } catch (e) {
+          console.error('Failed to parse JSON response:', e.message);
+          console.error('Raw response:', data.slice(0, 500) + '...');
+          reject(new Error(`Invalid JSON response from server: ${e.message}`));
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      console.error(`HTTPS request error: ${error.message}`);
+      reject(error);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error(`Request timeout after ${timeout}ms`));
+    });
+
+    req.end();
+  });
+}
 
 // Validation middleware
 const validateMetaParams = [
@@ -260,13 +325,13 @@ app.post('/api/analyze/batch', (req, res) => {
   }
 });
 
-// New endpoint to fetch blog titles from a WordPress site
+// New endpoint to fetch blog titles from a WordPress site using native https
 app.get('/api/getBlogTitles', async (req, res) => {
   try {
     // Get the site URL from the query parameter
-    const { url } = req.query;
+    const { url: siteUrl } = req.query;
     
-    if (!url) {
+    if (!siteUrl) {
       return res.status(400).json({
         error: 'Missing required parameter: url',
         message: 'Please provide a WordPress site URL'
@@ -274,56 +339,61 @@ app.get('/api/getBlogTitles', async (req, res) => {
     }
 
     // Construct the WordPress REST API endpoint URL
-    const apiUrl = `${url.endsWith('/') ? url.slice(0, -1) : url}/wp-json/wp/v2/posts?per_page=100`;
+    const apiUrl = `${siteUrl.endsWith('/') ? siteUrl.slice(0, -1) : siteUrl}/wp-json/wp/v2/posts?per_page=100`;
     
     console.log(`[INFO] Fetching blog posts from: ${apiUrl}`);
     
-    // Set timeout for the request (10 seconds)
-    const response = await axios.get(apiUrl, { timeout: 10000 });
-    
-    // Extract titles and dates from the posts
-    const blogPosts = response.data.map(post => ({
-      id: post.id,
-      title: post.title.rendered,
-      date: post.date,
-      modified: post.modified,
-      link: post.link
-    }));
-    
-    // Return the extracted data
-    res.json({
-      success: true,
-      count: blogPosts.length,
-      posts: blogPosts,
-      source: apiUrl,
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (error) {
-    console.error(`[ERROR] Failed to fetch blog titles: ${error.message}`);
-    
-    // Determine the appropriate error response
-    let statusCode = 500;
-    let errorMessage = 'Failed to fetch blog titles';
-    
-    if (error.code === 'ECONNABORTED') {
-      statusCode = 504; // Gateway Timeout
-      errorMessage = 'Request timed out after 10 seconds';
-    } else if (error.response) {
-      // The request was made and the server responded with a status code
-      // that falls out of the range of 2xx
-      statusCode = error.response.status;
-      errorMessage = `WordPress API returned error: ${error.response.status} ${error.response.statusText}`;
-    } else if (error.request) {
-      // The request was made but no response was received
-      statusCode = 502; // Bad Gateway
-      errorMessage = 'No response received from WordPress site';
+    try {
+      // Make the HTTPS request with a 10-second timeout
+      const response = await httpsGet(apiUrl, 10000);
+      
+      // Extract titles and dates from the posts
+      const blogPosts = response.data.map(post => ({
+        id: post.id,
+        title: post.title.rendered,
+        date: post.date,
+        modified: post.modified,
+        link: post.link
+      }));
+      
+      // Return the extracted data
+      res.json({
+        success: true,
+        count: blogPosts.length,
+        posts: blogPosts,
+        source: apiUrl,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error(`[ERROR] HTTPS request failed: ${error.message}`);
+      let statusCode = 500;
+      let errorMessage = 'Failed to fetch blog titles';
+      
+      if (error.message.includes('timeout')) {
+        statusCode = 504; // Gateway Timeout
+        errorMessage = 'Request timed out after 10 seconds';
+      } else if (error.message.includes('ENOTFOUND')) {
+        statusCode = 404;
+        errorMessage = 'Domain not found';
+      } else if (error.message.includes('ECONNREFUSED')) {
+        statusCode = 502;
+        errorMessage = 'Connection refused';
+      }
+      
+      res.status(statusCode).json({
+        success: false,
+        error: errorMessage,
+        message: process.env.NODE_ENV === 'production' ? errorMessage : error.message,
+        url: siteUrl
+      });
     }
+  } catch (error) {
+    console.error(`[ERROR] General error in getBlogTitles: ${error.message}`);
     
-    res.status(statusCode).json({
+    res.status(500).json({
       success: false,
-      error: errorMessage,
-      message: process.env.NODE_ENV === 'production' ? errorMessage : error.message,
+      error: 'Internal server error',
+      message: process.env.NODE_ENV === 'production' ? 'Something went wrong' : error.message,
       url: req.query.url
     });
   }
