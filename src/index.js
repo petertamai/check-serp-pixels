@@ -5,6 +5,7 @@ const cors = require('cors');
 const morgan = require('morgan');
 const { body, query, validationResult } = require('express-validator');
 const dotenv = require('dotenv');
+const axios = require('axios'); // Add axios for HTTP requests
 
 // Load environment variables
 dotenv.config();
@@ -259,6 +260,75 @@ app.post('/api/analyze/batch', (req, res) => {
   }
 });
 
+// New endpoint to fetch blog titles from a WordPress site
+app.get('/api/getBlogTitles', async (req, res) => {
+  try {
+    // Get the site URL from the query parameter
+    const { url } = req.query;
+    
+    if (!url) {
+      return res.status(400).json({
+        error: 'Missing required parameter: url',
+        message: 'Please provide a WordPress site URL'
+      });
+    }
+
+    // Construct the WordPress REST API endpoint URL
+    const apiUrl = `${url.endsWith('/') ? url.slice(0, -1) : url}/wp-json/wp/v2/posts?per_page=100`;
+    
+    console.log(`[INFO] Fetching blog posts from: ${apiUrl}`);
+    
+    // Set timeout for the request (10 seconds)
+    const response = await axios.get(apiUrl, { timeout: 10000 });
+    
+    // Extract titles and dates from the posts
+    const blogPosts = response.data.map(post => ({
+      id: post.id,
+      title: post.title.rendered,
+      date: post.date,
+      modified: post.modified,
+      link: post.link
+    }));
+    
+    // Return the extracted data
+    res.json({
+      success: true,
+      count: blogPosts.length,
+      posts: blogPosts,
+      source: apiUrl,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error(`[ERROR] Failed to fetch blog titles: ${error.message}`);
+    
+    // Determine the appropriate error response
+    let statusCode = 500;
+    let errorMessage = 'Failed to fetch blog titles';
+    
+    if (error.code === 'ECONNABORTED') {
+      statusCode = 504; // Gateway Timeout
+      errorMessage = 'Request timed out after 10 seconds';
+    } else if (error.response) {
+      // The request was made and the server responded with a status code
+      // that falls out of the range of 2xx
+      statusCode = error.response.status;
+      errorMessage = `WordPress API returned error: ${error.response.status} ${error.response.statusText}`;
+    } else if (error.request) {
+      // The request was made but no response was received
+      statusCode = 502; // Bad Gateway
+      errorMessage = 'No response received from WordPress site';
+    }
+    
+    res.status(statusCode).json({
+      success: false,
+      error: errorMessage,
+      message: process.env.NODE_ENV === 'production' ? errorMessage : error.message,
+      url: req.query.url
+    });
+  }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
@@ -290,6 +360,14 @@ app.get('/', (req, res) => {
           items: 'Array of objects containing id (optional), title (optional), and description (optional)'
         },
         example: 'POST to /api/analyze/batch with JSON body: {"items": [{"id": "1", "title": "First Title", "description": "First description"}, {"id": "2", "title": "Second Title"}]}'
+      },
+      '/api/getBlogTitles': {
+        methods: ['GET'],
+        description: 'Fetch blog post titles and dates from a WordPress site',
+        parameters: {
+          url: 'WordPress site URL (required)'
+        },
+        example: '/api/getBlogTitles?url=https://example.com'
       },
       '/health': {
         methods: ['GET'],
