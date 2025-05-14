@@ -56,8 +56,8 @@ const META_SETTINGS = {
   },
   description: {
     fontFamily: 'Arial',
-    fontSize: 14,
-    maxPixels: 920,
+    fontSize: 13,
+    maxPixels: 960,
     minPixels: 430 // Minimum to avoid auto-snippet
   }
 };
