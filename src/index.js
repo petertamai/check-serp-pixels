@@ -327,177 +327,142 @@ app.post('/api/analyze/batch', (req, res) => {
 
 // Function to fetch WordPress content by type
 async function fetchWordPressContent(siteUrl, contentType, timeout = 10000) {
-  // WordPress API endpoints for different content types
-  const typeToEndpoint = {
-    posts: 'posts',
-    pages: 'pages',
-    categories: 'categories',
-    tags: 'tags',
-    users: 'users',
-    media: 'media',
-    menus: 'menus',
-    comments: 'comments'
-  };
-  
-  // Handle default case
-  const endpoint = typeToEndpoint[contentType.toLowerCase()] || 'posts';
-  
-  // Construct the WordPress REST API endpoint URL
-  const apiUrl = `${siteUrl.endsWith('/') ? siteUrl.slice(0, -1) : siteUrl}/wp-json/wp/v2/${endpoint}?per_page=100`;
-  
-  console.log(`[INFO] Fetching WordPress ${contentType} from: ${apiUrl}`);
-  
-  try {
-    // Make the HTTPS request
-    const response = await httpsGet(apiUrl, timeout);
+    // Split contentType if it contains commas (to handle both array and comma-separated string)
+    const types = contentType.includes(',') ? contentType.split(',') : [contentType];
     
-    // Process the response based on content type
-    let formattedData;
+    const results = [];
     
-    switch(contentType.toLowerCase()) {
-      case 'posts':
-      case 'pages':
-        formattedData = response.data.map(item => ({
-          id: item.id,
-          title: item.title?.rendered || '',
-          date: item.date,
-          modified: item.modified,
-          link: item.link,
-          slug: item.slug,
-          status: item.status
-        }));
-        break;
+    for (const type of types) {
+      // WordPress API endpoints for different content types
+      const typeToEndpoint = {
+        posts: 'posts',
+        pages: 'pages',
+        categories: 'categories',
+        tags: 'tags',
+        users: 'users',
+        media: 'media',
+        menus: 'menus',
+        comments: 'comments'
+      };
+      
+      // Handle default case
+      const endpoint = typeToEndpoint[type.toLowerCase().trim()] || 'posts';
+      
+      // Construct the WordPress REST API endpoint URL
+      const apiUrl = `${siteUrl.endsWith('/') ? siteUrl.slice(0, -1) : siteUrl}/wp-json/wp/v2/${endpoint}?per_page=100`;
+      
+      console.log(`[INFO] Fetching WordPress ${type} from: ${apiUrl}`);
+      
+      try {
+        // Make the HTTPS request
+        const response = await httpsGet(apiUrl, timeout);
         
-      case 'categories':
-      case 'tags':
-        formattedData = response.data.map(item => ({
-          id: item.id,
-          name: item.name,
-          slug: item.slug,
-          count: item.count,
-          link: item.link
-        }));
-        break;
+        // Extract only titles and dates - nothing else
+        const formattedData = response.data.map(item => {
+          const result = {
+            id: item.id,
+            date: item.date || null,
+            modified: item.modified || null
+          };
+          
+          // Add title if available (handling different formats from different content types)
+          if (item.title) {
+            if (typeof item.title === 'object') {
+              result.title = item.title.rendered || '';
+            } else {
+              result.title = item.title || '';
+            }
+          } else if (item.name) {
+            result.title = item.name || '';
+          }
+          
+          return result;
+        });
         
-      case 'users':
-        formattedData = response.data.map(item => ({
-          id: item.id,
-          name: item.name,
-          slug: item.slug,
-          link: item.link
-        }));
-        break;
-        
-      case 'media':
-        formattedData = response.data.map(item => ({
-          id: item.id,
-          title: item.title?.rendered || '',
-          date: item.date,
-          type: item.media_type,
-          url: item.source_url,
-          alt: item.alt_text
-        }));
-        break;
-        
-      case 'comments':
-        formattedData = response.data.map(item => ({
-          id: item.id,
-          author: item.author_name,
-          date: item.date,
-          content: item.content?.rendered || '',
-          post: item.post
-        }));
-        break;
-        
-      default:
-        formattedData = response.data;
+        results.push({
+          type: type.trim(),
+          data: formattedData,
+          count: formattedData.length
+        });
+      } catch (error) {
+        console.error(`[ERROR] Failed to fetch ${type}: ${error.message}`);
+        results.push({
+          type: type.trim(),
+          error: `Failed to fetch ${type}: ${error.message}`,
+          data: []
+        });
+      }
     }
     
-    return {
-      type: contentType,
-      data: formattedData,
-      count: formattedData.length,
-      endpoint: apiUrl
-    };
-  } catch (error) {
-    console.error(`[ERROR] Failed to fetch ${contentType}: ${error.message}`);
-    return {
-      type: contentType,
-      error: `Failed to fetch ${contentType}: ${error.message}`,
-      endpoint: apiUrl
-    };
+    return results;
   }
-}
-
 // Combined GET/POST endpoint to fetch WordPress content
 app.all('/api/GetWebUrls', async (req, res) => {
-  try {
-    // Get parameters from either query params (GET) or request body (POST)
-    const siteUrl = req.method === 'GET' ? req.query.url : req.body.url;
-    let contentTypes = req.method === 'GET' 
-      ? (req.query.types ? req.query.types.split(',') : ['posts']) 
-      : (req.body.types || ['posts']);
-    
-    // Ensure contentTypes is an array
-    if (!Array.isArray(contentTypes)) {
-      contentTypes = [contentTypes];
-    }
-    
-    // Remove any empty strings and trim whitespace
-    contentTypes = contentTypes
-      .filter(type => type && type.trim())
-      .map(type => type.trim());
-    
-    // Default to 'posts' if no valid types provided
-    if (contentTypes.length === 0) {
-      contentTypes = ['posts'];
-    }
-    
-    // Validate site URL
-    if (!siteUrl) {
-      return res.status(400).json({
+    try {
+      // Handle input for both direct requests and AI-wrapped requests
+      let requestData = req.method === 'GET' ? req.query : req.body;
+      
+      // Check if the request is wrapped in an "input" object (AI integration format)
+      if (requestData.input && typeof requestData.input === 'object') {
+        requestData = requestData.input;
+        
+        // If input is a string (JSON string), parse it
+        if (typeof requestData === 'string') {
+          try {
+            requestData = JSON.parse(requestData);
+          } catch (e) {
+            console.error('Failed to parse input JSON string:', e.message);
+          }
+        }
+      }
+      
+      // Get parameters
+      const siteUrl = requestData.url;
+      let contentTypes = requestData.types || 'posts';
+      
+      // Validate site URL
+      if (!siteUrl) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required parameter: url',
+          message: 'Please provide a WordPress site URL'
+        });
+      }
+      
+      console.log(`[INFO] Fetching WordPress content for URL: ${siteUrl}, types: ${contentTypes}`);
+      
+      // Fetch content for the requested types
+      const results = await fetchWordPressContent(siteUrl, contentTypes, 10000);
+      
+      // Compile the response
+      const response = {
+        success: true,
+        url: siteUrl,
+        results: {},
+        timestamp: new Date().toISOString()
+      };
+      
+      // Organize results by content type
+      results.forEach(result => {
+        response.results[result.type] = {
+          count: result.data?.length || 0,
+          items: result.data || [],
+          error: result.error || null
+        };
+      });
+      
+      res.json(response);
+      
+    } catch (error) {
+      console.error(`[ERROR] GetWebUrls failed: ${error.message}`);
+      
+      res.status(500).json({
         success: false,
-        error: 'Missing required parameter: url',
-        message: 'Please provide a WordPress site URL'
+        error: 'Failed to fetch WordPress content',
+        message: process.env.NODE_ENV === 'production' ? 'Something went wrong' : error.message
       });
     }
-    
-    console.log(`[INFO] Fetching WordPress content for URL: ${siteUrl}, types: ${contentTypes.join(', ')}`);
-    
-    // Fetch content for each type in parallel
-    const contentPromises = contentTypes.map(type => fetchWordPressContent(siteUrl, type, 10000));
-    const results = await Promise.all(contentPromises);
-    
-    // Compile the response
-    const response = {
-      success: true,
-      url: siteUrl,
-      results: {},
-      timestamp: new Date().toISOString()
-    };
-    
-    // Organize results by content type
-    results.forEach(result => {
-      response.results[result.type] = {
-        count: result.data?.length || 0,
-        items: result.data || [],
-        error: result.error || null
-      };
-    });
-    
-    res.json(response);
-    
-  } catch (error) {
-    console.error(`[ERROR] GetWebUrls failed: ${error.message}`);
-    
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch WordPress content',
-      message: process.env.NODE_ENV === 'production' ? 'Something went wrong' : error.message,
-      url: req.method === 'GET' ? req.query.url : req.body.url
-    });
-  }
-});
+  });
 
 // Health check endpoint
 app.get('/health', (req, res) => {
