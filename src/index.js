@@ -357,12 +357,13 @@ async function fetchWordPressContent(siteUrl, contentType, timeout = 10000) {
         // Make the HTTPS request
         const response = await httpsGet(apiUrl, timeout);
         
-        // Extract only titles and dates - nothing else
+        // Extract titles, dates, and URLs
         const formattedData = response.data.map(item => {
           const result = {
             id: item.id,
             date: item.date || null,
-            modified: item.modified || null
+            modified: item.modified || null,
+            url: item.link || null // Add the URL (permalink) from the 'link' property
           };
           
           // Add title if available (handling different formats from different content types)
@@ -374,6 +375,11 @@ async function fetchWordPressContent(siteUrl, contentType, timeout = 10000) {
             }
           } else if (item.name) {
             result.title = item.name || '';
+          }
+          
+          // For posts and pages, extract slug if available
+          if (['posts', 'pages'].includes(endpoint) && item.slug) {
+            result.slug = item.slug;
           }
           
           return result;
